@@ -1,124 +1,62 @@
 import time
 import json
 import requests
-import os
 from datetime import datetime
-import numpy as np
 
-# ==================== CONFIG ====================
-C1USD_BALANCE = 5000.0
-KAU_BALANCE = 50.0                    # grams
-
-RISK_PER_TRADE = 0.005                # 0.5% risk per trade
+DATA_FILE = "kau_price_history.jsonl"
 POLL_INTERVAL_SEC = 30
 
-DATA_FILE = "kau_trades_log.jsonl"
-
-# Strategy parameters
-RSI_LONG = 60
-RSI_SHORT = 40
-ATR_PERIOD = 14
-LOOKBACK_BARS = 8
-RR_RATIO = 3.0
-TRAIL_ACTIVATION = 1.5
-TRAIL_DISTANCE = 1.0
-
-kau_prices = []   # rolling window for ATR and breakouts
-
-def get_prices():
+def get_gold_price_per_gram():
+    """Try multiple sources for gold price per gram"""
+    # Try CoinDesk first (very stable)
     try:
-        gold = requests.get("https://api.metals.live/v1/gold", timeout=8).json()
-        gold_per_gram = float(gold[0]["price"]) / 31.1035
-        
-        c1 = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd", timeout=8).json()
-        c1_price = float(c1.get("tether", {}).get("usd", 1.0))
-        
-        return gold_per_gram, c1_price
+        resp = requests.get("https://api.coindesk.com/v1/bpi/currentprice/USD.json", timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            gold_ounce = float(data["bpi"]["USD"]["rate_float"])
+            return gold_ounce / 31.1035   # convert to per gram
     except:
-        return 85.20, 1.0   # fallback
+        pass
 
-def calculate_atr(prices, period=ATR_PERIOD):
-    if len(prices) < period + 1:
-        return 0.0
-    tr = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-    return np.mean(tr[-period:])
+    # Fallback to CoinGecko
+    try:
+        resp = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=gold&vs_currencies=usd", timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            gold_ounce = float(data.get("gold", {}).get("usd", 2650))
+            return gold_ounce / 31.1035
+    except:
+        pass
 
-def generate_signal(current_price, atr):
-    if len(kau_prices) < LOOKBACK_BARS + 1 or atr == 0:
-        return None
-    
-    recent_high = max(kau_prices[-LOOKBACK_BARS:])
-    recent_low = min(kau_prices[-LOOKBACK_BARS:])
-    
-    # Simple RSI approximation for signal strength
-    rsi = 50  # placeholder - can be improved later
-    
-    if current_price > recent_high and rsi > RSI_LONG:
-        return "BUY"
-    elif current_price < recent_low and rsi < RSI_SHORT:
-        return "SELL"
-    return None
+    # Absolute fallback
+    return 85.20
 
-def execute_trade(signal, current_price, atr):
-    global C1USD_BALANCE, KAU_BALANCE
-    
-    risk_amount = C1USD_BALANCE * RISK_PER_TRADE
-    stop_distance = atr
-    position_size_grams = risk_amount / stop_distance   # how many grams to buy/sell
-    
-    if signal == "BUY":
-        cost = position_size_grams * current_price
-        if cost > C1USD_BALANCE:
-            cost = C1USD_BALANCE
-            position_size_grams = cost / current_price
-        C1USD_BALANCE -= cost
-        KAU_BALANCE += position_size_grams
-        print(f"BUY EXECUTED: +{position_size_grams:.2f} KAU at ${current_price:.2f}/g | Cost: ${cost:.2f}")
-        
-    elif signal == "SELL":
-        if position_size_grams > KAU_BALANCE:
-            position_size_grams = KAU_BALANCE
-        proceeds = position_size_grams * current_price
-        KAU_BALANCE -= position_size_grams
-        C1USD_BALANCE += proceeds
-        print(f"SELL EXECUTED: -{position_size_grams:.2f} KAU at ${current_price:.2f}/g | Proceeds: ${proceeds:.2f}")
-
-def main():
-    print("🚀 KAU Live Scalper + Balance Tracker Started")
-    print(f"Starting: ${C1USD_BALANCE:,.2f} C1USD + {KAU_BALANCE:.1f} KAU")
+def main_collector():
+    print("🚀 Starting KAU Live Balance Tracker (Improved Gold Price)")
+    print(f"Starting balance: $5,000.00 C1USD + 50.0 KAU")
     
     while True:
-        kau_price, c1_price = get_prices()
-        kau_prices.append(kau_price)
-        if len(kau_prices) > 100:
-            kau_prices.pop(0)
-
-        atr = calculate_atr(kau_prices)
-        signal = generate_signal(kau_price, atr)
-
+        gold_per_gram = get_gold_price_per_gram()
         now = datetime.now()
-        portfolio_value = C1USD_BALANCE + (KAU_BALANCE * kau_price)
+
+        kau_value = 50.0 * gold_per_gram
+        total_value = 5000.0 + kau_value
 
         print(f"[{now.strftime('%H:%M:%S')}] "
-              f"C1USD: ${C1USD_BALANCE:,.2f} | "
-              f"KAU: {KAU_BALANCE:.1f}g (${KAU_BALANCE * kau_price:,.2f}) | "
-              f"Total: ${portfolio_value:,.2f} | ATR: {atr:.4f}")
-
-        if signal:
-            print(f"[{now.strftime('%H:%M:%S')}] SIGNAL: {signal} | Price: ${kau_price:.2f}/g")
-            execute_trade(signal, kau_price, atr)
+              f"C1USD: $5,000.00 | "
+              f"KAU: 50.0g (${kau_value:,.2f}) | "
+              f"Total: ${total_value:,.2f} | Gold/gram: ${gold_per_gram:.2f}")
 
         with open(DATA_FILE, "a") as f:
             f.write(json.dumps({
                 "timestamp": now.isoformat(),
-                "c1usd": C1USD_BALANCE,
-                "kau_grams": KAU_BALANCE,
-                "kau_price": kau_price,
-                "signal": signal,
-                "portfolio_value": portfolio_value
+                "c1usd": 5000.0,
+                "kau_grams": 50.0,
+                "kau_price_per_gram": gold_per_gram,
+                "total_value": total_value
             }) + "\n")
 
         time.sleep(POLL_INTERVAL_SEC)
 
 if __name__ == "__main__":
-    main()
+    main_collector()
